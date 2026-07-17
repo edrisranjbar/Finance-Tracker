@@ -246,16 +246,16 @@ function importFromSheet(sheetName) {
 
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
 
-  // Locate the header row: column 1 = "name", column 2 = "total"
+  // Locate the header row: first row where col 0 = "name" and col 1 = "total"
   let headerIdx = -1;
   for (let i = 0; i < Math.min(rows.length, 12); i++) {
     const r = rows[i];
     if (
       r &&
-      String(r[1] || "")
+      String(r[0] || "")
         .toLowerCase()
         .trim() === "name" &&
-      String(r[2] || "")
+      String(r[1] || "")
         .toLowerCase()
         .trim() === "total"
     ) {
@@ -272,6 +272,57 @@ function importFromSheet(sheetName) {
     return;
   }
 
+  // Read column positions dynamically from the header row itself.
+  // The header has two "name"/"total" pairs (categories + income) and one "id"/"name"/"total" triple (transactions).
+  // We locate each group by scanning the header.
+  const hdr = rows[headerIdx];
+  let catNameIdx = -1,
+    catTotalIdx = -1;
+  let incNameIdx = -1,
+    incTotalIdx = -1;
+  let txIdIdx = -1,
+    txNameIdx = -1,
+    txAmtIdx = -1,
+    txCatIdx = -1;
+
+  let nameOccurrences = [];
+  hdr.forEach((cell, idx) => {
+    if (
+      String(cell || "")
+        .toLowerCase()
+        .trim() === "name"
+    )
+      nameOccurrences.push(idx);
+  });
+
+  // First "name" group → categories
+  if (nameOccurrences[0] !== undefined) {
+    catNameIdx = nameOccurrences[0];
+    catTotalIdx = catNameIdx + 1;
+  }
+  // Second "name" group → income sources
+  if (nameOccurrences[1] !== undefined) {
+    incNameIdx = nameOccurrences[1];
+    incTotalIdx = incNameIdx + 1;
+  }
+  // "id" column → transaction block
+  const txIdHdrIdx = hdr.findIndex(
+    (c) =>
+      String(c || "")
+        .toLowerCase()
+        .trim() === "id",
+  );
+  if (txIdHdrIdx !== -1) {
+    txIdIdx = txIdHdrIdx;
+    txNameIdx = txIdHdrIdx + 1;
+    txAmtIdx = txIdHdrIdx + 2;
+    // "category" may be at +3 (no Type col) or +4 (with Type col)
+    const afterAmt = String(hdr[txIdHdrIdx + 3] || "")
+      .toLowerCase()
+      .trim();
+    txCatIdx = afterAmt === "type" ? txIdHdrIdx + 4 : txIdHdrIdx + 3;
+  }
+
   let newIncomeCount = 0,
     newExpenseCount = 0,
     updatedBudgets = 0;
@@ -281,74 +332,72 @@ function importFromSheet(sheetName) {
     const r = rows[i];
     if (!r) continue;
 
-    // Budget categories: col B (idx 1) name, col C (idx 2) total budget
-    const catName = r[1];
-    const catTotal = parseFloat(r[2]);
-    if (catName && !isNaN(catTotal) && catTotal > 0) {
-      const lowerCat = String(catName).toLowerCase().trim();
-      const isSummaryRow =
-        lowerCat === "want:" ||
-        lowerCat === "need:" ||
-        lowerCat === "saving:" ||
-        lowerCat === "balance:";
-      if (!isSummaryRow) {
-        const catId = matchImportCategory(catName);
-        if (catId) {
-          const cat = ensureCategory(catId, catName);
-          cat.target = catTotal;
-          updatedBudgets++;
+    // Budget categories
+    if (catNameIdx !== -1) {
+      const catName = r[catNameIdx];
+      const catTotal = parseFloat(r[catTotalIdx]);
+      if (catName && !isNaN(catTotal) && catTotal > 0) {
+        const lowerCat = String(catName).toLowerCase().trim();
+        const isSummary = ["want:", "need:", "saving:", "balance:"].includes(
+          lowerCat,
+        );
+        if (!isSummary) {
+          const catId = matchImportCategory(catName);
+          if (catId) {
+            const cat = ensureCategory(catId, catName);
+            cat.target = catTotal;
+            updatedBudgets++;
+          }
         }
       }
     }
 
-    // Income sources: col G (idx 6) name, col H (idx 7) total
-    const incName = r[6];
-    const incAmount = parseFloat(r[7]);
-    if (incName && !isNaN(incAmount) && incAmount > 0) {
-      const lowerName = String(incName).toLowerCase().trim();
-      if (
-        lowerName !== "total icome:" &&
-        lowerName !== "total income:" &&
-        lowerName !== "goal:"
-      ) {
-        const id = lowerName.replace(/\s+/g, "_");
-        newIncomeMap[id] = {
-          id,
-          name: String(incName),
-          amount: incAmount,
-        };
-        newIncomeCount++;
+    // Income sources
+    if (incNameIdx !== -1) {
+      const incName = r[incNameIdx];
+      const incAmount = parseFloat(r[incTotalIdx]);
+      if (incName && !isNaN(incAmount) && incAmount > 0) {
+        const lowerName = String(incName).toLowerCase().trim();
+        if (!["total icome:", "total income:", "goal:"].includes(lowerName)) {
+          const id = lowerName.replace(/\s+/g, "_");
+          newIncomeMap[id] = { id, name: String(incName), amount: incAmount };
+          newIncomeCount++;
+        }
       }
     }
 
-    // Transaction list: col J (idx 9) id, col K (idx 10) name, col L (idx 11) amount, col M (idx 12) type, col N (idx 13) category
-    const txName = r[10];
-    const txAmount = parseFloat(r[11]);
-    const txCategory = r[13];
-    if (
-      txName &&
-      !isNaN(txAmount) &&
-      txAmount > 0 &&
-      String(txName).toLowerCase().trim() !== "name"
-    ) {
-      let catId = matchImportCategory(txCategory);
-      if (!catId)
-        catId = ensureCategory(
-          "cat_" +
-            String(txCategory || "misc")
-              .toLowerCase()
-              .replace(/[^a-z0-9]+/g, "_"),
-          txCategory,
-        ).id;
-      state.expenses.push({
-        id:
-          Date.now().toString() + "_" + Math.random().toString(36).slice(2, 8),
-        categoryId: catId,
-        desc: String(txName),
-        amount: txAmount,
-        date: sheetName,
-      });
-      newExpenseCount++;
+    // Transactions
+    if (txNameIdx !== -1) {
+      const txName = r[txNameIdx];
+      const txAmount = parseFloat(r[txAmtIdx]);
+      const txCat = txCatIdx !== -1 ? r[txCatIdx] : null;
+      if (
+        txName &&
+        !isNaN(txAmount) &&
+        txAmount > 0 &&
+        String(txName).toLowerCase().trim() !== "name"
+      ) {
+        let catId = matchImportCategory(txCat);
+        if (!catId)
+          catId = ensureCategory(
+            "cat_" +
+              String(txCat || "misc")
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, "_"),
+            txCat,
+          ).id;
+        state.expenses.push({
+          id:
+            Date.now().toString() +
+            "_" +
+            Math.random().toString(36).slice(2, 8),
+          categoryId: catId,
+          desc: String(txName),
+          amount: txAmount,
+          date: sheetName,
+        });
+        newExpenseCount++;
+      }
     }
   }
 
@@ -873,10 +922,7 @@ function renderCharts(totalIncome) {
             grid: { color: "#1A212E" },
           },
           y: {
-            ticks: {
-              color: "#7C8493",
-              font: { size: 11, family: "Inter" },
-            },
+            ticks: { color: "#7C8493", font: { size: 11, family: "Inter" } },
             grid: { color: "transparent" },
           },
         },
