@@ -1,9 +1,5 @@
 // ── DEFAULT DATA ──────────────────────────────────────────────────────────────
-const DEFAULT_INCOMES = [
-  { id: "islamhadaya", name: "Islamhadaya", amount: 15000000 },
-  { id: "tashe", name: "Tashe", amount: 1500000 },
-  { id: "yaraneh", name: "Yaraneh", amount: 600000 },
-];
+const DEFAULT_INCOMES = [];
 
 const DEFAULT_CATEGORIES = [
   { id: "food", label: "🛒 Food & Drinks", target: 6000000 },
